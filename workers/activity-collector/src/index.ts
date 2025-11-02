@@ -15,31 +15,36 @@ interface Activity {
 
 // WakaTime API integration
 async function fetchWakaTimeData(apiKey: string): Promise<Activity[]> {
-  const response = await fetch('https://wakatime.com/api/v1/users/current/durations/today', {
+  const response = await fetch('https://wakatime.com/api/v1/users/current/summaries?start=today&end=today', {
     headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json'
+      'Authorization': `Basic ${btoa(apiKey)}`
     }
   })
 
   if (!response.ok) {
-    console.error('WakaTime API error:', response.status, response.statusText)
     return []
   }
 
   const data = await response.json() as { data: any[] }
 
-  return data.data.map((duration: any) => ({
-    id: `wakatime-${duration.id}`,
+  if (!data.data || data.data.length === 0) {
+    return []
+  }
+
+  const todaySummary = data.data[0]
+  const projects = todaySummary.projects || []
+
+  return projects.map((project: any) => ({
+    id: `wakatime-${todaySummary.range.date}-${project.name}`,
     source: 'wakatime' as const,
     type: 'coding' as const,
-    title: duration.project || 'Unknown Project',
+    title: project.name || 'Unknown Project',
     creators: null,
     url: null,
-    started_at: duration.start_time,
-    completed_at: duration.end_time || new Date().toISOString(),
-    duration_seconds: duration.duration,
-    raw: duration
+    started_at: todaySummary.range.start,
+    completed_at: todaySummary.range.end,
+    duration_seconds: Math.round(project.total_seconds),
+    raw: project
   }))
 }
 
@@ -52,31 +57,36 @@ async function fetchMonkeytypeData(apeKey: string): Promise<Activity[]> {
   })
 
   if (!response.ok) {
-    console.error('Monkeytype API error:', response.status, response.statusText)
-    const errorText = await response.text()
-    console.error('Monkeytype error details:', errorText)
     return []
   }
 
   const data = await response.json() as { data: any[] }
 
   if (!data.data || data.data.length === 0) {
-    console.log('No Monkeytype results found')
     return []
   }
 
-  return data.data.map((result: any) => ({
-    id: `monkeytype-${result._id}`,
-    source: 'monkeytype' as const,
-    type: 'typing_test' as const,
-    title: `${result.wpm} WPM - ${result.acc}% accuracy`,
-    creators: null,
-    url: null,
-    started_at: new Date(result.timestamp).toISOString(),
-    completed_at: new Date(result.timestamp).toISOString(),
-    duration_seconds: Math.round(result.testDuration),
-    raw: result
-  }))
+  return data.data.map((result: any) => {
+    // Extract test type from raw data
+    const testType = result.mode === 'time' 
+      ? `${result.mode2}s` 
+      : result.mode === 'words' 
+      ? `${result.mode2} words` 
+      : result.mode
+    
+    return {
+      id: `monkeytype_${result._id}`,
+      source: 'monkeytype' as const,
+      type: 'typing_test' as const,
+      title: `${Math.round(result.wpm)} WPM · ${Math.round(result.acc)}% · ${testType}`,
+      creators: null,
+      url: null,
+      started_at: new Date(result.timestamp).toISOString(),
+      completed_at: new Date(result.timestamp).toISOString(),
+      duration_seconds: Math.round(result.testDuration),
+      raw: result
+    }
+  })
 }
 
 // ListenBrainz API integration
@@ -86,14 +96,12 @@ async function fetchListenBrainzData(username: string): Promise<Activity[]> {
   )
 
   if (!response.ok) {
-    console.error('ListenBrainz API error:', response.status, response.statusText)
     return []
   }
 
   const data = await response.json() as { payload: { listens: any[] } }
 
   if (!data.payload?.listens || data.payload.listens.length === 0) {
-    console.log('No ListenBrainz listens found')
     return []
   }
 
@@ -125,39 +133,26 @@ async function fetchListenBrainzData(username: string): Promise<Activity[]> {
 // Main worker handler
 export default {
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
-    console.log('Starting activity collection...')
-
     const supabase = createClient(env.SUPABASE_DB_URL, env.SUPABASE_SERVICE_ROLE_KEY)
 
     try {
-      // Fetch data from WakaTime, Monkeytype, and ListenBrainz
-      const [wakatimeData, monkeytypeData, listenbrainzData] = await Promise.all([
+      const [wakatimeData, monkeytypeData] = await Promise.all([
         fetchWakaTimeData(env.WAKATIME_API_KEY),
-        fetchMonkeytypeData(env.MONKEYTYPE_APE_KEY),
-        fetchListenBrainzData(env.LISTENBRAINZ_USER)
+        fetchMonkeytypeData(env.MONKEYTYPE_API_KEY)
       ])
 
-      const allActivities = [...wakatimeData, ...monkeytypeData, ...listenbrainzData]
+      const allActivities = [...wakatimeData, ...monkeytypeData]
 
       if (allActivities.length === 0) {
-        console.log('No new activities found')
         return
       }
 
-      // Insert activities with conflict handling
-      const { error } = await supabase
+      await supabase
         .from('activity')
         .upsert(allActivities, { onConflict: 'id' })
 
-      if (error) {
-        console.error('Error inserting activities:', error)
-        return
-      }
-
-      console.log(`Successfully inserted ${allActivities.length} activities`)
-
     } catch (error) {
-      console.error('Error in activity collection:', error)
+      // Silent fail
     }
   },
 
@@ -170,6 +165,6 @@ interface Env {
   SUPABASE_DB_URL: string
   SUPABASE_SERVICE_ROLE_KEY: string
   WAKATIME_API_KEY: string
-  MONKEYTYPE_APE_KEY: string
-  LISTENBRAINZ_USER: string
+  MONKEYTYPE_API_KEY: string
+  MONKEYTYPE_USERNAME: string
 }

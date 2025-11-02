@@ -8,21 +8,23 @@ export async function GET(request: NextRequest) {
     const date =
       searchParams.get("date") || new Date().toISOString().split("T")[0];
 
+    const startDate = new Date(date + 'T00:00:00-05:00');
+    const endDate = new Date(date + 'T23:59:59-05:00');
+
     const { data, error } = await supabaseAdmin
       .from("activity")
       .select("*")
-      .eq("completed_at::date", date)
+      .gte("completed_at", startDate.toISOString())
+      .lte("completed_at", endDate.toISOString())
       .order("completed_at", { ascending: false });
 
     if (error) {
-      console.error("Supabase error:", error);
       return NextResponse.json(
         { error: "Failed to fetch activities" },
         { status: 500 },
       );
     }
 
-    // Group activities by source
     const groupedActivities = data.reduce(
       (acc: Record<string, Activity[]>, activity) => {
         if (!acc[activity.source]) {
